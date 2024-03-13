@@ -58,7 +58,7 @@ def calculate_Hist(image1, image2):
   hist2 = cv2.calcHist([image2], [0], None, [256], [0, 256])
 
   # 比較兩張圖像的直方圖
-  correlation = cv2.compareHist(hist1, hist2, cv2.CV_COMP_CORREL)
+  correlation = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
 
   # 如果相關係數大於 0.9，則認為兩張圖像相似
   # 回傳correlation
