@@ -1,0 +1,113 @@
+# -*- coding:utf-8 -*-
+# max866 2024/3/13
+
+import requests
+import cv2
+import numpy as np
+import time
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime
+#from dotenv import load_dotenv,find_dotenv
+
+#load_dotenv(find_dotenv())
+#token = os.environ.get('LineTK')
+token = '輸入自己申請的LineNotify KEY'
+
+def get_pk_list(url):
+    pk_list = []
+    try:
+        response = requests.get(url)
+        print(f'現在時間:{datetime.now()} CCD狀態：{response.status_code}')
+        if response.status_code != 200:
+            msg = f'觀測站CCD 連線異常! ({response.status_code})'
+            lineNotifyMessage(token, msg)
+            with open('captureCCD_img_v5.txt', 'a') as f:
+                f.write(f'觀測站CCD 連線異常! 現在時間:{datetime.now()} CCD狀態：{response.status_code} \n')
+        else:    
+            soup = BeautifulSoup(response.content, 'html.parser')
+            script_tag = soup.find('script', string=re.compile('var PKList = .*?;'))
+            if script_tag:
+                pk_data = re.search(r'var PKList = (\[.*?\]);', script_tag.string).group(1)
+                pk_list = eval(pk_data)  # 將 JavaScript 陣列轉換成 Python 的 List
+            return pk_list
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+def save_ccd_image(url, filename):
+    try:
+        response = requests.get(url)
+        with open(filename, 'wb') as f:
+            f.write(response.content)
+        print(f"Image saved to {filename}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def calculate_mse(image1, image2):
+    resized_image1 = cv2.resize(image1, (100, int(image1.shape[0] * (100 / image1.shape[1]))))
+    resized_image2 = cv2.resize(image2, (100, int(image2.shape[0] * (100 / image2.shape[1]))))
+    
+    mse = np.mean((resized_image1 - resized_image2) ** 2)
+    return mse
+
+def calculate_Hist(image1, image2):
+  # 計算兩張圖像的直方圖
+  hist1 = cv2.calcHist([image1], [0], None, [256], [0, 256])
+  hist2 = cv2.calcHist([image2], [0], None, [256], [0, 256])
+
+  # 比較兩張圖像的直方圖
+  correlation = cv2.compareHist(hist1, hist2, cv2.CV_COMP_CORREL)
+
+  # 如果相關係數大於 0.9，則認為兩張圖像相似
+  # 回傳correlation
+  return correlation
+
+
+def lineNotifyMessage(token, msg):
+    headers = {
+          "Authorization": "Bearer " + token, 
+          "Content-Type" : "application/x-www-form-urlencoded"
+    }
+ 
+    payload = {'message': msg}
+    r = requests.post("https://notify-api.line.me/api/notify", headers = headers, params = payload)
+    return r.status_code
+
+if __name__ == "__main__":
+    url = "https://dfm.ardswc.gov.tw/mydfm/CCD/Show?SID=573&ID=1&PLAY=1"
+    
+    previous_image = None
+    while True:
+        try:
+            pk_list = get_pk_list(url)
+            image_url = 'https://dfm.ardswc.gov.tw/mydfm/CCD/ShowOne/' + str(pk_list[0])
+            print(f'{pk_list}')
+            filename = f"ccd_image_{pk_list[0]}.png"
+            save_ccd_image(image_url, filename)
+
+            if previous_image is not None:
+                current_image = cv2.imread(filename)
+                previous_image = cv2.imread(previous_filename)
+
+                # 用mse 方式比較兩張圖的相似度
+                # mse = calculate_mse(previous_image, current_image)
+                # similarity_percentage = (1 - (mse / 255.0 ** 2)) * 100
+
+                # 用Hist 直方圖比較兩張圖的相似度
+                correlation = calculate_Hist(previous_image, current_image)
+                similarity_percentage = correlation * 100
+                print(f"Similarity percentage: {similarity_percentage:.2f}%")
+                with open('captureCCD_img_v2.txt', 'a') as f:
+                    f.write(f'CCD 畫面相似度:{similarity_percentage}%, 現在時間:{datetime.now()} CCD 影像：{previous_filename} - {filename} \n')
+                if similarity_percentage < 30:
+                    print(f'現在時間:{datetime.now()} CCD 畫面相似度低於30：{previous_filename} - {filename}')
+                    msg = '觀測站CCD 畫面相似度異常!'
+                    lineNotifyMessage(token, msg)
+            previous_filename = filename
+            previous_image = cv2.imread(previous_filename)
+        except Exception as e:
+            print(e)
+        
+        time.sleep(180)
