@@ -161,6 +161,7 @@ if __name__ == "__main__":
                     current_image = cv2.imread(filename)
                     previous_image = cv2.imread(previous_filename)
 
+                    # 用mse 方式比較兩張圖的相似度
                     mse = calculate_mse(previous_image, current_image)
                     similarity_percentage_mse = (1 - (mse / 255.0 ** 2)) * 100
                     print(f"Similarity percentage_mse: {similarity_percentage_mse:.2f}%")
@@ -171,6 +172,7 @@ if __name__ == "__main__":
                         print(msg_mse)
                         lineNotifyMessage(token, msg_mse)
 
+                    # 用Hist 直方圖比較兩張圖的相似度
                     similarity_percentage_hist = calculate_hist(previous_image, current_image) * 100
                     print(f"Similarity percentage_hist: {similarity_percentage_hist:.2f}%")
                     with open('captureCCD_img_v7.txt', 'a') as f:
