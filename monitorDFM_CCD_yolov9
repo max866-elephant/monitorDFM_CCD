@@ -1,0 +1,189 @@
+# -*- coding:utf-8 -*-
+# max866 2024/3/11
+
+import requests
+import cv2
+import numpy as np
+import time
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime
+import torch
+from models.common import DetectMultiBackend
+from utils.general import non_max_suppression, scale_boxes
+from utils.torch_utils import select_device, smart_inference_mode
+from utils.augmentations import letterbox
+import PIL.Image
+from PIL import Image
+import supervision as sv
+
+token = 'Ur lineNotify Token'
+
+def get_pk_list(url):
+    pk_list = []
+    try:
+        response = requests.get(url)
+        print(f'現在時間:{datetime.now()} CCD狀態：{response.status_code}')
+        if response.status_code != 200:
+            msg = f'觀測站CCD 連線異常! {response.status_code}'
+            lineNotifyMessage(token, msg)
+            with open('captureCCD_img_v7.txt', 'a') as f:
+                f.write(f'觀測站CCD 連線異常! 現在時間:{datetime.now()} CCD狀態：{response.status_code} \n')
+        soup = BeautifulSoup(response.content, 'html.parser')
+        script_tag = soup.find('script', string=re.compile('var PKList = .*?;'))
+        if script_tag:
+            pk_data = re.search(r'var PKList = (\[.*?\]);', script_tag.text).group(1)
+            pk_list = eval(pk_data)  # 將 JavaScript 陣列轉換成 Python 的 List
+    except Exception as e:
+        print(f"Error: {e}")
+    return pk_list
+
+def save_ccd_image(url, filename):
+    try:
+        response = requests.get(url)
+        with open(filename, 'wb') as f:
+            f.write(response.content)
+        print(f"Image saved to {filename}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def calculate_mse(image1, image2):
+    resized_image1 = cv2.resize(image1, (100, int(image1.shape[0] * (100 / image1.shape[1]))))
+    resized_image2 = cv2.resize(image2, (100, int(image2.shape[0] * (100 / image2.shape[1]))))
+    
+    mse = np.mean((resized_image1 - resized_image2) ** 2)
+    return mse
+
+def calculate_hist(image1, image2):
+  # Calculate histograms
+  hist1 = cv2.calcHist([image1], [0], None, [256], [0, 256])
+  hist2 = cv2.calcHist([image2], [0], None, [256], [0, 256])
+
+  correlation = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+
+  return correlation
+
+def lineNotifyMessage(token, msg):
+    headers = {
+          "Authorization": "Bearer " + token, 
+          "Content-Type" : "application/x-www-form-urlencoded"
+    }
+ 
+    payload = {'message': msg}
+    r = requests.post("https://notify-api.line.me/api/notify", headers = headers, params = payload)
+    return r.status_code
+
+@smart_inference_mode()
+def predict(image_path, weights='yolov9-c.pt', imgsz=640, conf_thres=0.1, iou_thres=0.45, device='0', data='data/coco.yaml'):
+    # Initialize
+    device = select_device(device)
+    model = DetectMultiBackend(weights, device=device, fp16=False, data=data)
+    stride, names, pt = model.stride, model.names, model.pt
+
+    # Load image
+    image = PIL.Image.open(image_path)
+    img0 = np.array(image)
+    assert img0 is not None, f'Image Not Found {image_path}'
+    img = letterbox(img0, imgsz, stride=stride, auto=True)[0]
+    img = img[:, :, ::-1].transpose(2, 0, 1)
+    img = np.ascontiguousarray(img)
+    img = torch.from_numpy(img).to(device).float()
+    img /= 255.0
+    if img.ndimension() == 3:
+        img = img.unsqueeze(0)
+
+    # Init bounding box annotator and label annotator
+    bounding_box_annotator = sv.BoxAnnotator()
+    label_annotator = sv.LabelAnnotator(text_position=sv.Position.CENTER)
+
+    # Inference
+    pred = model(img, augment=False, visualize=False)
+
+    # Apply NMS
+    pred = non_max_suppression(pred[0][0], conf_thres, iou_thres, classes=None, max_det=1000)
+
+    # Process detections
+    for i, det in enumerate(pred):
+        if len(det):
+            det[:, :4] = scale_boxes(img.shape[2:], det[:, :4], img0.shape).round()
+            for *xyxy, conf, cls in reversed(det):
+                label = f'{names[int(cls)]} {conf:.2f}'
+                # Transform detections to supervisions detections
+                detections = sv.Detections(
+                    xyxy=torch.stack(xyxy).cpu().numpy().reshape(1, -1),
+                    class_id=np.array([int(cls)]),
+                    confidence=np.array([float(conf)])
+                )
+
+                # Labels
+                labels = [
+                    f"{class_id} {confidence:0.2f}"
+                    for class_id, confidence
+                    in zip(detections.class_id, detections.confidence)
+                ]
+
+                img0 = bounding_box_annotator.annotate(img0, detections)
+                img0 = label_annotator.annotate(img0, detections, labels)
+
+    return img0[:, :, ::-1]
+
+
+if __name__ == "__main__":
+    url = "https://dfm.ardswc.gov.tw/mydfm/CCD/Show?SID=801&ID=1&PLAY=1"
+    previous_image = None
+    
+    # yolov9 權重路徑
+    weights_path = f'./weights/yolov9-e.pt'
+    
+    while True:
+        try:
+            pk_list = get_pk_list(url)
+            print(f'{pk_list}')
+            if pk_list:
+                image_url = 'https://dfm.ardswc.gov.tw/mydfm/CCD/ShowOne/' + str(pk_list[0])
+                filename = f"ccd_image_{pk_list[0]}.png"
+                save_ccd_image(image_url, filename)
+
+                image_path = f'./{filename}'
+                output_path = image_path.replace(f'{filename}', f'yolov9_{filename}')
+
+                # yolov9 分析CCD 影像
+                img = predict(image_path=f'{image_path}',weights=f'{weights_path}', device='cpu')
+
+                # 在save 之前，把numpy.ndarray 轉換成PIL.Image
+                img = Image.fromarray(img)
+                img.save(output_path)
+
+                if previous_image is not None:
+                    current_image = cv2.imread(filename)
+                    previous_image = cv2.imread(previous_filename)
+
+                    mse = calculate_mse(previous_image, current_image)
+                    similarity_percentage_mse = (1 - (mse / 255.0 ** 2)) * 100
+                    print(f"Similarity percentage_mse: {similarity_percentage_mse:.2f}%")
+                    with open('captureCCD_img_v7.txt', 'a') as f:
+                        f.write(f'CCD 畫面相似度:{similarity_percentage_mse}%, 現在時間:{datetime.now()} CCD 影像：{previous_filename} - {filename} by mse\n')
+                    if similarity_percentage_mse < 30:
+                        msg_mse = f'現在時間:{datetime.now()} CCD 畫面相似度低於30：{previous_filename} - {filename} by mse'
+                        print(msg_mse)
+                        lineNotifyMessage(token, msg_mse)
+
+                    similarity_percentage_hist = calculate_hist(previous_image, current_image) * 100
+                    print(f"Similarity percentage_hist: {similarity_percentage_hist:.2f}%")
+                    with open('captureCCD_img_v7.txt', 'a') as f:
+                        f.write(f'CCD 畫面相似度:{similarity_percentage_hist}%, 現在時間:{datetime.now()} CCD 影像：{previous_filename} - {filename} by hist\n')
+                    if similarity_percentage_hist < 30:
+                        msg_hist = f'現在時間:{datetime.now()} CCD 畫面相似度低於30：{previous_filename} - {filename} by hist'
+                        print(msg_hist)
+                        lineNotifyMessage(token, msg_hist)
+
+                previous_filename = filename
+                previous_image = cv2.imread(previous_filename)
+            else:
+                print(f'pk_list no data')
+        except Exception as e:
+            print(e)    
+
+        time.sleep(180)
+    
+    
