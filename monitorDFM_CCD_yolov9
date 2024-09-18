@@ -55,13 +55,16 @@ def calculate_mse(image1, image2):
     return mse
 
 def calculate_hist(image1, image2):
-  # Calculate histograms
+  # 計算兩張圖像的直方圖
   hist1 = cv2.calcHist([image1], [0], None, [256], [0, 256])
   hist2 = cv2.calcHist([image2], [0], None, [256], [0, 256])
 
+  # 比較兩張圖像的直方圖
   correlation = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-
+  
+  # 回傳correlation
   return correlation
+
 
 def lineNotifyMessage(token, msg):
     headers = {
